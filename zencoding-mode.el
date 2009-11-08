@@ -45,6 +45,24 @@
 
 ;;; Code:
 
+
+;;; Customization
+;;
+
+(defgroup zencoding nil
+  "zencoding group."
+  :group 'editing)
+
+(defface zencoding-preview-input-face
+  '((t (:underline t)))
+  "Face used for preview input."
+  :group 'zencoding)
+
+(defface zencoding-preview-output-face
+  '((t (:background "light grey")))
+  "Face used for preview input."
+  :group 'zencoding)
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Generic parsing macros and utilities
 
@@ -360,7 +378,6 @@
             tests)
     (concat (number-to-string (length tests)) " tests performed. All OK.")))
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Zencoding minor mode
 
@@ -382,31 +399,32 @@
               (insert markup-filled)
               (indent-region line-start (+ line-start (length markup-filled))))))))
 
-(defvar zencoding-mode-keymap nil
+(defvar zencoding-mode-keymap
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "<C-return>")  'zencoding-expand-line)
+    (define-key map (kbd "<C-c> <C-p>") 'zencoding-preview-of-region)
+    map)
   "Keymap for zencode minor mode.")
 
-(if zencoding-mode-keymap
-    nil
-  (progn
-    (setq zencoding-mode-keymap (make-sparse-keymap))
-    (define-key zencoding-mode-keymap (kbd "<C-return>") 'zencoding-expand-line)))
-
-(define-minor-mode zencoding-mode "Minor mode to assist writing markup."
+(define-minor-mode zencoding-mode
+  "Minor mode to assist writing markup."
   :lighter " Zen"
-  :keymap zencoding-mode-keymap)
+  :group   'zencoding
+  :keymap  zencoding-mode-keymap)
 
 
 ;;; Real-time preview
 ;;
 
-(defvar zencoding-realtime-preview-keymap
+(defvar zencoding-preview-keymap
   (let ((map (make-sparse-keymap)))
-    (define-key map "\C-c\C-c" 'zencoding-delete-overlay-pair)
-
+    (define-key map "\C-c\C-c" 'zencoding-preview-accept)
+    (define-key map "\C-c\C-q" 'zencoding-preview-cancel)
+    (define-key map "\C-c\C-b" 'zencoding-preview-keep-both)
     map)
-  "Keymap used in zencoding realtime preview overlays.")
+  "Keymap used in zencoding preview overlays.")
 
-(defun zencoding-realtime-preview-of-region (beg end)
+(defun zencoding-preview-of-region (beg end)
   "Construct a real-time preview for the region BEG to END."
   (interactive "r")
   (let ((beg2)
@@ -417,60 +435,112 @@
       (setq beg2 (point)
 	    end2 (point))
       (insert "\n"))
-    (let ((input-and-output (zencoding-make-overlay-pair beg end beg2 end2)))
-      (zencoding-handle-overlay-change (car input-and-output) nil nil nil)))
+    (let ((input-and-output (zencoding-preview--make-overlay-pair beg end beg2 end2)))
+      (zencoding-preview--handle-overlay-change (car input-and-output) nil nil nil)))
   )
 
-(defun zencoding-make-overlay-pair (beg1 end1 beg2 end2)
+(defun zencoding-preview-accept ()
+  ""
+  (interactive)
+  (let ((overlays (zencoding-preview--overlays-at-point)))
+    (apply #'zencoding-preview--delete-overlay-pair
+	   (append overlays '(input)))))
+
+(defun zencoding-preview-cancel ()
+  ""
+  (interactive)
+  (let ((overlays (zencoding-preview--overlays-at-point)))
+    (apply #'zencoding-preview--delete-overlay-pair
+	   (append overlays '(output)))))
+
+(defun zencoding-preview-keep-both ()
+  ""
+  (interactive)
+  (let ((overlays (zencoding-preview--overlays-at-point)))
+    (apply #'zencoding-preview--delete-overlay-pair overlays)))
+
+(defun zencoding-preview--make-overlay-pair (beg1 end1 beg2 end2)
   "Construct an input and an output overlay for BEG1 END1 and BEG2 END2"
-  (let ((input  (make-overlay beg1 end1 nil t t))
-	(output (make-overlay beg2 end2)))
+  (let ((input  (make-overlay beg1 end1 nil nil t))
+	(output (make-overlay beg2 end2))
+	(funs   (list #'zencoding-preview--handle-overlay-change)))
     ;; Setup input overlay
-    (overlay-put input  'face '(:underline t))
-    (overlay-put input  'modification-hooks
-		        (list #'zencoding-handle-overlay-change))
-    (overlay-put input  'output output)
-    (overlay-put input  'keymap zencoding-realtime-preview-keymap)
+    (mapc
+     (lambda (key-and-value)
+       (apply #'overlay-put input key-and-value))
+     `((face                  zencoding-preview-input-face)
+       (modification-hooks    ,funs)
+       (insert-in-front-hooks ,funs)
+       (insert-behind-hooks   ,funs)
+       (output                ,output)
+       (keymap                ,zencoding-preview-keymap)))
+
     ;; Setup output overlay
-    (overlay-put output 'face '(:overline t))
-    (overlay-put output 'intangible t)
-    (overlay-put output 'input input)
+    (mapc
+     (lambda (key-and-value)
+       (apply #'overlay-put output key-and-value))
+     `((face       zencoding-preview-output-face)
+       (intangible t)
+       (input      ,input)))
+
     ;; Return the overlays.
     (list input output))
   )
 
-(defun zencoding-delete-overlay-pair (&optional one)
+(defun zencoding-preview--delete-overlay-pair (input output &optional content)
   "Delete a pair of input and output overlays based on ONE."
-  (interactive) ;; Since called from keymap
-  (unless one
-    (let ((overlays (overlays-at (point))))
-      (while (and overlays
-		  (not (or (overlay-get (car overlays) 'input)
-			   (overlay-get (car overlays) 'output))))
-	(setq overlays (cdr overlays)))
-      (setq one (car overlays))))
-  (when one
-    (let ((other (or (overlay-get one 'input)
-		     (overlay-get one 'output))))
-      (delete-overlay one)
-      (delete-overlay other)))
+  ;; Make sure we do not accidentally update anything.
+  (overlay-put input 'modification-hooks    nil)
+  (overlay-put input 'insert-in-front-hooks nil)
+  (overlay-put input 'insert-behind-hooks   nil)
+
+  ;;
+  (case content
+   (input
+    (delete-region (overlay-start input) (overlay-end input)))
+   (output
+    (delete-region (overlay-start output) (overlay-end output)))
+   (both
+    (delete-region (overlay-start input) (overlay-end input))
+    (delete-region (overlay-start output) (overlay-end output))))
+
+  ;;
+  (delete-overlay input)
+  (delete-overlay output)
   )
 
-(defun zencoding-handle-overlay-change (input del beg end &optional old)
+(defun zencoding-preview--overlays-at-point ()
+  ""
+  (let ((overlays (overlays-at (point)))
+	(one))
+    (while (and overlays
+		(not (or (overlay-get (car overlays) 'input)
+			 (overlay-get (car overlays) 'output))))
+      (setq overlays (cdr overlays)))
+    (setq one (car overlays))
+    (if (overlay-get one 'output)
+	(list one (overlay-get one 'output))
+      (list (overlay-get one 'input) one)))
+  )
+
+(defun zencoding-preview--handle-overlay-change (input del beg end &optional old)
   "Update preview after overlay change."
-  (let* ((output (overlay-get input 'output))
-	 (start  (overlay-start output))
-	 (string (buffer-substring-no-properties
-		  (overlay-start input)
-		  (overlay-end input)))
-	 (ast    (car (zencoding-expr string)))
-	 (markup (when (not (eq ast 'error))
-		   (zencoding-transform ast))))
+  (let* ((output        (overlay-get input 'output))
+	 (start         (overlay-start output))
+	 (string        (buffer-substring-no-properties
+			 (overlay-start input)
+			 (overlay-end input)))
+	 (ast           (car (zencoding-expr string)))
+	 (markup        (when (not (eq ast 'error))
+			  (zencoding-transform ast)))
+	 (markup-filled (when markup
+			  (replace-regexp-in-string
+			   "><" ">\n<" markup))))
     (save-excursion
       (delete-region start (overlay-end output))
       (goto-char start)
       (if markup
-	  (insert markup)
+	  (insert markup-filled)
 	(insert (propertize "error" 'face 'font-lock-error-face)))
       (move-overlay output start (point))))
   )
